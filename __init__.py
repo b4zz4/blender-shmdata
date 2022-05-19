@@ -12,38 +12,42 @@
 # along with this program. If not, see <http://www.gnu.org/licenses/>.
 
 bl_info = {
-    "name" : "Spout",
-    "author" : "Martin Froehlich",
-    "description" : "Streaming Spout from Blender",
+    "name" : "shmdata cameras",
+    "author" : "Ernesto Bazzano",
+    "description" : "Streaming shmdata from Blender",
     "blender" : (3, 0, 0),
-    "version" : (2, 0, 2),
+    "version" : (0, 0, 1),
     "location" : "Properties > Camera > Camera data",
-    "warning" : "This plugin works only if the SpoutGL (https://pypi.org/project/SpoutGL/#files) is inside '~/scripts/modules'",
+    "warning" : "This plugin works with shmdata",
     "category" : "Render", 
-    "wiki_url" : "https://github.com/maybites/blender.script.spout",
-    "tracker_url" : "https://github.com/maybites/blender.script.spout/issues",
+    "wiki_url" : "https://github.com/b4zz4/blender-shmdata",
+    "tracker_url" : "https://github.com/b4zz4/blender-shmdata/issues",
     "support" : "COMMUNITY"
 }
-
+# based in Martin Froehlich
 import bpy
 from bpy.types import Panel
 
-import SpoutGL
 import bgl
 import gpu
 import uuid
 import textwrap
 from gpu_extras.presets import draw_texture_2d
 
+import pyshmdata
+from array import array
+
+
 #dictionary to store the references to
 db_drawHandle = {} # the draw handler 
-db_spoutInstances = {} # the spout instance
+#db_spoutInstances = {} # the spout instance
 
 # function for the draw handler to capture the texture from the perspective of the camera
-def texshare_capture(self, context, camera, object, space, region, scene, layer, offscreen, spoutSender, showPreview):
+def texshare_capture(self, context, camera, object, space, region, scene, layer, offscreen, showPreview, writer, buffer):
     dWIDTH = camera.texshare.capture_width
     dHEIGHT = camera.texshare.capture_height
     applyCM = camera.texshare.applyColorManagmentSettings
+    bgl.glDisable(bgl.GL_DEPTH_TEST)
 
     view_matrix = object.matrix_world.inverted()
 
@@ -63,46 +67,64 @@ def texshare_capture(self, context, camera, object, space, region, scene, layer,
 
     if showPreview:
         bgl.glDisable(bgl.GL_DEPTH_TEST)
-        draw_texture_2d(offscreen.color_texture, (10, 10), dWIDTH / 4, dHEIGHT / 4)
+        draw_texture_2d(offscreen.color_texture, (0, 0), dWIDTH/4, dHEIGHT/4)
 
-    spoutSender.sendTexture(offscreen.color_texture, bgl.GL_TEXTURE_2D, dWIDTH, dHEIGHT, True, 0)
-    spoutSender.setFrameSync(camera.name)
+    space.overlay.show_floor = False
+    space.overlay.show_axis_x = False
+    space.overlay.show_axis_y = False
+    space.overlay.show_cursor = False
+    space.overlay.show_object_origins = False
+
+
+
+    bgl.glDisable(bgl.GL_BLEND)
+    bgl.glDisable(bgl.GL_LINE_SMOOTH)
+    bgl.glDisable(bgl.GL_DEPTH_TEST)
+
+    draw_texture_2d(offscreen.color_texture, (0, 0), dWIDTH, dHEIGHT)
+    #buffer = bgl.Buffer(bgl.GL_INT, dWIDTH * dHEIGHT * 4)
+    bgl.glReadPixels(0, 0, dWIDTH, dHEIGHT, bgl.GL_RGBA, bgl.GL_UNSIGNED_BYTE, buffer)
+    writer.push(bytearray(array("i",buffer.to_list())))
+    #del(buffer_data)
+
+    #spoutSender.sendTexture(offscreen.color_texture, bgl.GL_TEXTURE_2D, dWIDTH, dHEIGHT, True, 0)
+    #spoutSender.setFrameSync(camera.name)
  
          
 # main function called when the settings 'enable' property is changed
 def texshare_main(self, context):
     global db_drawHandle
-    global db_spoutInstances
-    
+    #global db_spoutInstances
     guivars = context.camera.texshare
-    
+
     # my database ID
     dbID = guivars.dbID
-    
+
     # if streaming has been enabled and no id has yet been stored in the db
     if context.camera.texshare.enable == 1 and dbID not in db_drawHandle:
         # first we create a unique identifier for the reference db dicts
         dbID = str(uuid.uuid1())
-        
+
         dWIDTH = guivars.capture_width
         dHEIGHT = guivars.capture_height
-        
+
         # create a new spout sender instance
-        spoutSender = SpoutGL.SpoutSender()
-        spoutSender.setSenderName(context.camera.name)       
-        
+        #spoutSender = SpoutGL.SpoutSender()
+        #spoutSender.setSenderName(context.camera.name)
+
         # create a off screen renderer
         offscreen = gpu.types.GPUOffScreen(dWIDTH, dHEIGHT)
 
         mySpace = context.space_data
         myRegion = context.region
- 
+
         for area in bpy.data.workspaces[guivars.workspace].screens[0].areas:
             if area.type == 'VIEW_3D':
                 myRegion = area.regions[0]
                 for spaces in area.spaces:
                     if spaces.type == 'VIEW_3D':
                         mySpace = spaces
+
 
         myScene = bpy.data.scenes[guivars.scene]
         myLayer = myScene.view_layers[guivars.layer]
@@ -116,26 +138,28 @@ def texshare_main(self, context):
 
         bpy.context.window.scene = myCurrentScene
         bpy.context.window.view_layer = myCurrentLayer
-
+        writer = pyshmdata.Writer(path="/tmp/blender_" + str(context.camera.name), datatype="video/x-raw,height="+str(dHEIGHT)+",width="+str(dWIDTH)+",framerate=25/1,format=RGBA")
+        buffer = bgl.Buffer(bgl.GL_INT, dWIDTH * dHEIGHT)
         # collect all the arguments to pass to the draw handler
-        args = (self, context, context.camera, context.object, mySpace, myRegion, myScene, myLayer, offscreen, spoutSender, guivars.preview)
+        args = (self, context, context.camera, context.object, mySpace, myRegion, myScene, myLayer, offscreen, guivars.preview, writer, buffer)
         
         # instantiate the draw handler, 
         # using the texshare_capture function defined above
         drawhandle = bpy.types.SpaceView3D.draw_handler_add(texshare_capture, args, 'WINDOW', 'POST_PIXEL')
-        
+
         # store the references inside the db-dicts
         db_drawHandle[dbID] = drawhandle
-        db_spoutInstances[dbID] = spoutSender
+        #db_spoutInstances[dbID] = spoutSender
         
     # if streaming has been disabled and my ID is still stored in the db
     if context.camera.texshare.enable == 0 and dbID in db_drawHandle:
         bpy.types.SpaceView3D.draw_handler_remove(db_drawHandle[dbID], 'WINDOW')
-        db_spoutInstances[dbID].releaseSender()
+        #db_spoutInstances[dbID].releaseSender()
         #removing my ID
         db_drawHandle.pop(dbID, None)
         dbID == "off"
     
+    print("hola")
     # store the database ID again inside the settings
     context.camera.texshare.dbID = dbID
 
@@ -197,7 +221,7 @@ class TEXS_PG_camera_texshare_settings(bpy.types.PropertyGroup):
         )
     layer : bpy.props.StringProperty(
         name ="layer",
-        default= "ViewLayer",
+        default= "View Layer",
         description = "Layer in Scene to render"
         )
     preview : bpy.props.BoolProperty(
@@ -224,7 +248,7 @@ class TEXS_PT_camera_texshare( CameraButtonsPanel, Panel ):
     def draw_header(self, context):
         cam = context.camera
         self.layout.prop(cam.texshare, "enable", text="", )
-        
+
     def draw(self, context):
         layout = self.layout
         ob = context.object
@@ -236,7 +260,7 @@ class TEXS_PT_camera_texshare( CameraButtonsPanel, Panel ):
 
         row = layout.row(align=True)
         row.prop(ob.data, "name", text="Server name")
-        
+
         row = layout.row(align=True)
         row.prop(camera.texshare, "applyColorManagmentSettings", text="Apply color managment")
 
